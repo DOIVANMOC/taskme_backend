@@ -85,8 +85,9 @@ async function startServer() {
     console.log('Initializing TaskMe Production Database...');
     await getDb();
 
-    app.listen(PORT, () => {
-      console.log(`TaskMe Production Server is running at http://localhost:${PORT}`);
+    const port = Number(process.env.PORT) || 3001;
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`TaskMe Production Server is running on port ${port} (0.0.0.0)`);
     });
   } catch (err) {
     console.error('Failed to start TaskMe server:', err);
