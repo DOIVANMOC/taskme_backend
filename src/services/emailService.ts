@@ -1,26 +1,39 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 465;
-const SMTP_USER = process.env.SMTP_USER || '';
-const SMTP_PASS = process.env.SMTP_PASS || '';
-const SMTP_FROM = process.env.SMTP_FROM || `"TaskMe Edu" <${SMTP_USER || 'no-reply@taskme.edu.vn'}>`;
+function getTransporter(): Transporter | null {
+  const user = process.env.SMTP_USER?.trim();
+  const pass = process.env.SMTP_PASS?.trim();
+  const host = process.env.SMTP_HOST?.trim() || 'smtp.gmail.com';
+  const port = Number(process.env.SMTP_PORT) || 465;
 
-let transporter: Transporter | null = null;
+  if (!user || !pass) return null;
 
-if (SMTP_USER && SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465,
-    auth: {
-      user: SMTP_USER,
-      pass: SMTP_PASS,
-    },
+  if (host.includes('gmail')) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user, pass },
+    });
+  }
+
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure: port === 465,
+    auth: { user, pass },
   });
 }
 
-export async function sendOtpEmail(to: string, otp: string, userName: string): Promise<{ success: boolean; previewOtp?: string }> {
+export async function sendOtpEmail(to: string, otp: string, userName: string): Promise<{ success: boolean }> {
+  const transporter = getTransporter();
+  if (!transporter) {
+    throw new Error(
+      'Hệ thống chưa được cấu hình tài khoản gửi Email (SMTP). Vui lòng thêm biến môi trường SMTP_USER và SMTP_PASS (Mật khẩu ứng dụng Gmail) trên Render.'
+    );
+  }
+
+  const user = process.env.SMTP_USER?.trim() || '';
+  const fromAddress = process.env.SMTP_FROM || `"TaskMe Edu" <${user}>`;
+
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -67,24 +80,17 @@ export async function sendOtpEmail(to: string, otp: string, userName: string): P
     </html>
   `;
 
-  if (transporter) {
-    try {
-      await transporter.sendMail({
-        from: SMTP_FROM,
-        to,
-        subject: `[TaskMe] Mã xác thực đặt lại mật khẩu của bạn: ${otp}`,
-        html: htmlContent,
-      });
-      console.log(`[EMAIL_SERVICE] OTP successfully sent via SMTP to ${to}`);
-      return { success: true };
-    } catch (err) {
-      console.error('[EMAIL_SERVICE] Failed to send email via SMTP:', err);
-    }
+  try {
+    await transporter.sendMail({
+      from: fromAddress,
+      to,
+      subject: `[TaskMe] Mã xác thực đặt lại mật khẩu của bạn: ${otp}`,
+      html: htmlContent,
+    });
+    console.log(`[EMAIL_SERVICE] OTP successfully sent via SMTP to ${to}`);
+    return { success: true };
+  } catch (err: any) {
+    console.error('[EMAIL_SERVICE] Failed to send email via SMTP:', err);
+    throw new Error(`Không thể gửi email: ${err.message || 'Lỗi kết nối máy chủ gửi thư'}`);
   }
-
-  // Fallback: If SMTP is not yet configured, log OTP to console
-  console.log(`========================================`);
-  console.log(`[EMAIL_SERVICE - FALLBACK] OTP for ${to}: ${otp}`);
-  console.log(`========================================`);
-  return { success: true, previewOtp: !SMTP_USER ? otp : undefined };
 }

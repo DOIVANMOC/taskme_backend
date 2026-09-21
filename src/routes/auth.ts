@@ -191,16 +191,15 @@ authRouter.post('/send-otp', async (req: Request, res: Response): Promise<void> 
     );
 
     // Send email
-    const emailResult = await sendOtpEmail(user.email, otp, user.name);
+    await sendOtpEmail(user.email, otp, user.name);
 
     res.json({
       message: `Mã OTP đã được gửi đến email ${maskEmail(user.email)}`,
       maskedEmail: maskEmail(user.email),
-      previewOtp: emailResult.previewOtp,
     });
   } catch (err: any) {
     console.error('Send OTP error:', err);
-    res.status(500).json({ error: 'Lỗi hệ thống khi gửi mã xác thực OTP' });
+    res.status(500).json({ error: err.message || 'Lỗi hệ thống khi gửi mã xác thực OTP' });
   }
 });
 
