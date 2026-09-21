@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.resolve(__dirname, '../../data');
 const DB_FILE = path.join(DATA_DIR, 'taskme.db');
+const BACKUP_FILE = path.join(DATA_DIR, 'users_backup.json');
 
 let db: SqlJsDatabase | null = null;
 
@@ -38,6 +39,18 @@ export function saveDb(): void {
     const data = db.export();
     const buffer = Buffer.from(data);
     fs.writeFileSync(DB_FILE, buffer);
+
+    // Save persistent users JSON backup
+    const stmt = db.prepare('SELECT id, name, email, username, password_hash, avatar, role, created_at FROM users');
+    const users: any[] = [];
+    while (stmt.step()) {
+      users.push(stmt.getAsObject());
+    }
+    stmt.free();
+
+    if (users.length > 0) {
+      fs.writeFileSync(BACKUP_FILE, JSON.stringify(users, null, 2));
+    }
   } catch (err) {
     console.error('Failed to save database to disk:', err);
   }
@@ -116,6 +129,24 @@ function initTables(database: SqlJsDatabase): void {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
+
+  try {
+    const countRes = database.exec('SELECT count(*) as count FROM users');
+    const userCount = (countRes[0]?.values[0]?.[0] as number) || 0;
+    if (userCount === 0 && fs.existsSync(BACKUP_FILE)) {
+      const backupData = JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf-8'));
+      for (const u of backupData) {
+        database.run(
+          `INSERT OR IGNORE INTO users (id, name, email, username, password_hash, avatar, role, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [u.id, u.name, u.email, u.username, u.password_hash, u.avatar, u.role, u.created_at]
+        );
+      }
+      console.log(`Auto-restored ${backupData.length} user(s) from persistent backup.`);
+    }
+  } catch (err) {
+    console.error('Failed to auto-restore users from backup:', err);
+  }
 }
 
 export function query<T = any>(sql: string, params: any[] = []): T[] {

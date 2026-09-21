@@ -98,13 +98,14 @@ authRouter.post('/login', async (req, res): Promise<void> => {
     );
 
     if (!user) {
-      res.status(401).json({ error: 'Tài khoản hoặc mật khẩu không chính xác' });
+      res.status(401).json({ error: 'Tài khoản không tồn tại. Vui lòng kiểm tra lại email/tên đăng nhập hoặc đăng ký mới' });
       return;
     }
 
-    const isMatch = await bcrypt.compare(password, user.password_hash);
+    const cleanPassword = typeof password === 'string' ? password.trim() : '';
+    const isMatch = await bcrypt.compare(cleanPassword, user.password_hash);
     if (!isMatch) {
-      res.status(401).json({ error: 'Tài khoản hoặc mật khẩu không chính xác' });
+      res.status(401).json({ error: 'Mật khẩu không chính xác. Bạn có thể bấm "Quên mật khẩu" bên dưới để đặt lại mật khẩu mới.' });
       return;
     }
 
@@ -125,6 +126,43 @@ authRouter.post('/login', async (req, res): Promise<void> => {
   } catch (err: any) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Lỗi hệ thống khi đăng nhập' });
+  }
+});
+
+// POST /api/auth/reset-password
+authRouter.post('/reset-password', async (req, res): Promise<void> => {
+  try {
+    const { identifier, newPassword } = req.body;
+
+    if (!identifier || !newPassword) {
+      res.status(400).json({ error: 'Vui lòng cung cấp email/tên đăng nhập và mật khẩu mới' });
+      return;
+    }
+
+    const cleanPass = typeof newPassword === 'string' ? newPassword.trim() : '';
+    if (cleanPass.length < 6) {
+      res.status(400).json({ error: 'Mật khẩu mới phải có tối thiểu 6 ký tự' });
+      return;
+    }
+
+    const trimmedIdentifier = identifier.trim().toLowerCase();
+    const user = queryOne<{ id: number; name: string }>(
+      'SELECT id, name FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?',
+      [trimmedIdentifier, trimmedIdentifier]
+    );
+
+    if (!user) {
+      res.status(404).json({ error: 'Không tìm thấy tài khoản với email hoặc tên đăng nhập này' });
+      return;
+    }
+
+    const newHash = await bcrypt.hash(cleanPass, 10);
+    execute('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, user.id]);
+
+    res.json({ message: 'Đặt lại mật khẩu thành công! Bây giờ bạn có thể đăng nhập bằng mật khẩu mới.' });
+  } catch (err: any) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Lỗi hệ thống khi đặt lại mật khẩu' });
   }
 });
 
