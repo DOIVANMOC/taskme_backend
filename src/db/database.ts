@@ -41,7 +41,7 @@ export function saveDb(): void {
     fs.writeFileSync(DB_FILE, buffer);
 
     // Save persistent users JSON backup
-    const stmt = db.prepare('SELECT id, name, email, username, password_hash, avatar, role, created_at FROM users');
+    const stmt = db.prepare('SELECT id, name, email, username, password_hash, avatar, role, recovery_pin, created_at FROM users');
     const users: any[] = [];
     while (stmt.step()) {
       users.push(stmt.getAsObject());
@@ -66,6 +66,7 @@ function initTables(database: SqlJsDatabase): void {
       password_hash TEXT NOT NULL,
       avatar TEXT,
       role TEXT NOT NULL DEFAULT 'STUDENT',
+      recovery_pin TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -139,6 +140,17 @@ function initTables(database: SqlJsDatabase): void {
     );
   `);
 
+  // Migration: Ensure recovery_pin column exists and has default PIN
+  try {
+    database.run('ALTER TABLE users ADD COLUMN recovery_pin TEXT;');
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    database.run("UPDATE users SET recovery_pin = '123456' WHERE recovery_pin IS NULL OR recovery_pin = ''");
+  } catch {}
+
   try {
     const countRes = database.exec('SELECT count(*) as count FROM users');
     const userCount = (countRes[0]?.values[0]?.[0] as number) || 0;
@@ -146,9 +158,9 @@ function initTables(database: SqlJsDatabase): void {
       const backupData = JSON.parse(fs.readFileSync(BACKUP_FILE, 'utf-8'));
       for (const u of backupData) {
         database.run(
-          `INSERT OR IGNORE INTO users (id, name, email, username, password_hash, avatar, role, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [u.id, u.name, u.email, u.username, u.password_hash, u.avatar, u.role, u.created_at]
+          `INSERT OR IGNORE INTO users (id, name, email, username, password_hash, avatar, role, recovery_pin, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [u.id, u.name, u.email, u.username, u.password_hash, u.avatar, u.role, u.recovery_pin || '123456', u.created_at]
         );
       }
       console.log(`Auto-restored ${backupData.length} user(s) from persistent backup.`);

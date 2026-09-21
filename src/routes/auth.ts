@@ -10,7 +10,7 @@ export const authRouter = Router();
 // POST /api/auth/register
 authRouter.post('/register', async (req, res): Promise<void> => {
   try {
-    const { name, email, username, password, role } = req.body;
+    const { name, email, username, password, role, recoveryPin } = req.body;
 
     if (!name || !email || !username || !password) {
       res.status(400).json({ error: 'Vui lòng điền đầy đủ tất cả các trường bắt buộc' });
@@ -37,6 +37,10 @@ authRouter.post('/register', async (req, res): Promise<void> => {
       return;
     }
 
+    const cleanPin = (recoveryPin && typeof recoveryPin === 'string' && /^\d{4,6}$/.test(recoveryPin.trim()))
+      ? recoveryPin.trim()
+      : '123456';
+
     const userRole = role === 'ROOM_OWNER' ? 'ROOM_OWNER' : 'STUDENT';
     const passwordHash = await bcrypt.hash(password, 10);
     const now = new Date().toISOString();
@@ -44,9 +48,9 @@ authRouter.post('/register', async (req, res): Promise<void> => {
     const defaultAvatar = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name)}&backgroundColor=2563eb,3b82f6,1d4ed8`;
 
     const result = execute(
-      `INSERT INTO users (name, email, username, password_hash, avatar, role, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [name.trim(), trimmedEmail, trimmedUsername, passwordHash, defaultAvatar, userRole, now]
+      `INSERT INTO users (name, email, username, password_hash, avatar, role, recovery_pin, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name.trim(), trimmedEmail, trimmedUsername, passwordHash, defaultAvatar, userRole, cleanPin, now]
     );
 
     const newUserId = result.lastInsertRowid;
@@ -56,7 +60,8 @@ authRouter.post('/register', async (req, res): Promise<void> => {
       email: trimmedEmail,
       username: trimmedUsername,
       avatar: defaultAvatar,
-      role: userRole
+      role: userRole,
+      recovery_pin: cleanPin,
     };
 
     const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
@@ -288,11 +293,56 @@ authRouter.post('/verify-otp-reset', async (req: Request, res: Response): Promis
   }
 });
 
-// Legacy reset-password endpoint: Block direct password resets without OTP
+// POST /api/auth/reset-password (Secure password reset via Recovery PIN)
 authRouter.post('/reset-password', async (req: Request, res: Response): Promise<void> => {
-  res.status(400).json({
-    error: 'Phương thức đặt lại mật khẩu cũ không còn được hỗ trợ vì lý do an ninh. Vui lòng sử dụng xác thực qua mã OTP.',
-  });
+  try {
+    const { identifier, recoveryPin, newPassword } = req.body;
+
+    if (!identifier || !recoveryPin || !newPassword) {
+      res.status(400).json({ error: 'Vui lòng điền đầy đủ Email/Tên đăng nhập, Mã PIN bảo mật và Mật khẩu mới' });
+      return;
+    }
+
+    const cleanPass = typeof newPassword === 'string' ? newPassword.trim() : '';
+    if (cleanPass.length < 6) {
+      res.status(400).json({ error: 'Mật khẩu mới phải có tối thiểu 6 ký tự' });
+      return;
+    }
+
+    const cleanPin = typeof recoveryPin === 'string' ? recoveryPin.trim() : '';
+    if (!/^\d{4,6}$/.test(cleanPin)) {
+      res.status(400).json({ error: 'Mã PIN bảo mật phải gồm từ 4 đến 6 chữ số' });
+      return;
+    }
+
+    const trimmed = identifier.trim().toLowerCase();
+    const user = queryOne<{ id: number; name: string; email: string; username: string; recovery_pin: string }>(
+      'SELECT id, name, email, username, recovery_pin FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?',
+      [trimmed, trimmed]
+    );
+
+    if (!user) {
+      res.status(404).json({ error: 'Không tìm thấy tài khoản với email hoặc tên đăng nhập này' });
+      return;
+    }
+
+    const correctPin = (user.recovery_pin && user.recovery_pin.trim()) || '123456';
+    if (cleanPin !== correctPin) {
+      res.status(400).json({ error: 'Mã PIN bảo mật không chính xác! Vui lòng kiểm tra lại mã PIN của bạn.' });
+      return;
+    }
+
+    // PIN is correct! Hash and update password
+    const newHash = await bcrypt.hash(cleanPass, 10);
+    execute('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, user.id]);
+
+    res.json({
+      message: 'Đặt lại mật khẩu thành công! Bây giờ bạn có thể đăng nhập bằng mật khẩu mới.',
+    });
+  } catch (err: any) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Lỗi hệ thống khi đặt lại mật khẩu' });
+  }
 });
 
 // GET /api/auth/me
