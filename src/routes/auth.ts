@@ -1,8 +1,9 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { queryOne, execute } from '../db/database.js';
 import { authMiddleware, AuthenticatedRequest, JWT_SECRET } from '../middleware/auth.js';
+import { sendOtpEmail } from '../services/emailService.js';
 
 export const authRouter = Router();
 
@@ -129,26 +130,30 @@ authRouter.post('/login', async (req, res): Promise<void> => {
   }
 });
 
-// POST /api/auth/reset-password
-authRouter.post('/reset-password', async (req, res): Promise<void> => {
+// Helper function to mask email for privacy (e.g. h***3@gmail.com)
+function maskEmail(email: string): string {
+  const parts = email.split('@');
+  if (parts.length !== 2) return email;
+  const [name, domain] = parts;
+  if (name.length <= 2) {
+    return `${name[0]}***@${domain}`;
+  }
+  return `${name[0]}***${name[name.length - 1]}@${domain}`;
+}
+
+// POST /api/auth/send-otp
+authRouter.post('/send-otp', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { identifier, newPassword } = req.body;
-
-    if (!identifier || !newPassword) {
-      res.status(400).json({ error: 'Vui lòng cung cấp email/tên đăng nhập và mật khẩu mới' });
+    const { identifier } = req.body;
+    if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
+      res.status(400).json({ error: 'Vui lòng cung cấp email hoặc tên đăng nhập' });
       return;
     }
 
-    const cleanPass = typeof newPassword === 'string' ? newPassword.trim() : '';
-    if (cleanPass.length < 6) {
-      res.status(400).json({ error: 'Mật khẩu mới phải có tối thiểu 6 ký tự' });
-      return;
-    }
-
-    const trimmedIdentifier = identifier.trim().toLowerCase();
-    const user = queryOne<{ id: number; name: string }>(
-      'SELECT id, name FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?',
-      [trimmedIdentifier, trimmedIdentifier]
+    const trimmed = identifier.trim().toLowerCase();
+    const user = queryOne<{ id: number; name: string; email: string }>(
+      'SELECT id, name, email FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?',
+      [trimmed, trimmed]
     );
 
     if (!user) {
@@ -156,14 +161,139 @@ authRouter.post('/reset-password', async (req, res): Promise<void> => {
       return;
     }
 
+    // Rate-limit check: Has an OTP been sent in the last 45 seconds?
+    const existing = queryOne<{ id: number; created_at: string }>(
+      'SELECT id, created_at FROM password_resets WHERE email = ? ORDER BY id DESC LIMIT 1',
+      [user.email]
+    );
+    if (existing) {
+      const diffSeconds = (Date.now() - new Date(existing.created_at).getTime()) / 1000;
+      if (diffSeconds < 45) {
+        res.status(429).json({
+          error: `Vui lòng chờ ${Math.ceil(45 - diffSeconds)} giây trước khi yêu cầu mã OTP mới`,
+        });
+        return;
+      }
+    }
+
+    // Generate secure 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    const now = new Date().toISOString();
+
+    // Clean up any old OTPs for this email
+    execute('DELETE FROM password_resets WHERE email = ?', [user.email]);
+
+    // Insert new OTP record
+    execute(
+      'INSERT INTO password_resets (email, otp_code, expires_at, attempts, created_at) VALUES (?, ?, ?, 0, ?)',
+      [user.email, otp, expiresAt, now]
+    );
+
+    // Send email
+    const emailResult = await sendOtpEmail(user.email, otp, user.name);
+
+    res.json({
+      message: `Mã OTP đã được gửi đến email ${maskEmail(user.email)}`,
+      maskedEmail: maskEmail(user.email),
+      previewOtp: emailResult.previewOtp,
+    });
+  } catch (err: any) {
+    console.error('Send OTP error:', err);
+    res.status(500).json({ error: 'Lỗi hệ thống khi gửi mã xác thực OTP' });
+  }
+});
+
+// POST /api/auth/verify-otp-reset
+authRouter.post('/verify-otp-reset', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { identifier, otp, newPassword } = req.body;
+
+    if (!identifier || !otp || !newPassword) {
+      res.status(400).json({ error: 'Vui lòng điền đầy đủ mã OTP và mật khẩu mới' });
+      return;
+    }
+
+    const cleanPass = newPassword.trim();
+    if (cleanPass.length < 6) {
+      res.status(400).json({ error: 'Mật khẩu mới phải có tối thiểu 6 ký tự' });
+      return;
+    }
+
+    const trimmed = identifier.trim().toLowerCase();
+    const cleanOtp = otp.toString().trim();
+
+    const user = queryOne<{ id: number; name: string; email: string }>(
+      'SELECT id, name, email FROM users WHERE LOWER(email) = ? OR LOWER(username) = ?',
+      [trimmed, trimmed]
+    );
+
+    if (!user) {
+      res.status(404).json({ error: 'Không tìm thấy tài khoản người dùng' });
+      return;
+    }
+
+    // Look for reset record
+    const resetRecord = queryOne<{
+      id: number;
+      otp_code: string;
+      expires_at: string;
+      attempts: number;
+    }>(
+      'SELECT id, otp_code, expires_at, attempts FROM password_resets WHERE email = ? ORDER BY id DESC LIMIT 1',
+      [user.email]
+    );
+
+    if (!resetRecord) {
+      res.status(400).json({ error: 'Chưa có yêu cầu mã xác thực nào. Vui lòng bấm "Gửi mã OTP" trước.' });
+      return;
+    }
+
+    // Check attempts limit (e.g., max 5 attempts)
+    if (resetRecord.attempts >= 5) {
+      execute('DELETE FROM password_resets WHERE email = ?', [user.email]);
+      res.status(400).json({ error: 'Bạn đã nhập sai mã OTP quá 5 lần. Mã này đã bị hủy vì lý do an toàn. Vui lòng yêu cầu mã mới.' });
+      return;
+    }
+
+    // Check expiration
+    if (new Date(resetRecord.expires_at).getTime() < Date.now()) {
+      execute('DELETE FROM password_resets WHERE email = ?', [user.email]);
+      res.status(400).json({ error: 'Mã xác thực OTP đã hết hạn (chỉ có hiệu lực 5 phút). Vui lòng yêu cầu mã mới.' });
+      return;
+    }
+
+    // Verify OTP code
+    if (resetRecord.otp_code !== cleanOtp) {
+      const remainingAttempts = 5 - (resetRecord.attempts + 1);
+      execute('UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?', [resetRecord.id]);
+      res.status(400).json({
+        error: `Mã OTP không chính xác. Bạn còn ${remainingAttempts} lần thử.`,
+      });
+      return;
+    }
+
+    // OTP is valid! Update password
     const newHash = await bcrypt.hash(cleanPass, 10);
     execute('UPDATE users SET password_hash = ? WHERE id = ?', [newHash, user.id]);
 
-    res.json({ message: 'Đặt lại mật khẩu thành công! Bây giờ bạn có thể đăng nhập bằng mật khẩu mới.' });
+    // Clean up reset record
+    execute('DELETE FROM password_resets WHERE email = ?', [user.email]);
+
+    res.json({
+      message: 'Đặt lại mật khẩu thành công! Bây giờ bạn có thể đăng nhập bằng mật khẩu mới.',
+    });
   } catch (err: any) {
-    console.error('Reset password error:', err);
-    res.status(500).json({ error: 'Lỗi hệ thống khi đặt lại mật khẩu' });
+    console.error('Verify OTP and reset password error:', err);
+    res.status(500).json({ error: 'Lỗi hệ thống khi xác thực và đặt lại mật khẩu' });
   }
+});
+
+// Legacy reset-password endpoint: Block direct password resets without OTP
+authRouter.post('/reset-password', async (req: Request, res: Response): Promise<void> => {
+  res.status(400).json({
+    error: 'Phương thức đặt lại mật khẩu cũ không còn được hỗ trợ vì lý do an ninh. Vui lòng sử dụng xác thực qua mã OTP.',
+  });
 });
 
 // GET /api/auth/me
